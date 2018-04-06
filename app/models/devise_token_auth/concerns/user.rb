@@ -16,7 +16,6 @@ module DeviseTokenAuth::Concerns::User
 
   included do
     if DeviseTokenAuth.mongoid?(self)
-      require 'mongoid-locker'
       include Mongoid::Locker
     end
 
