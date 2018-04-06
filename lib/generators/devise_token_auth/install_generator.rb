@@ -4,14 +4,18 @@ module DeviseTokenAuth
 
     source_root File.expand_path('../templates', __FILE__)
 
-    argument :user_class, type: :string, default: "User"
+    argument :user_class, type: :string, default: 'User'
     argument :mount_path, type: :string, default: 'auth'
+    argument :orm,    type: :string, default: 'ActiveRecord'
 
     def create_initializer_file
       copy_file("devise_token_auth.rb", "config/initializers/devise_token_auth.rb")
+      template("devise.rb", "config/initializers/devise.rb") if mongoid?
     end
 
     def copy_migrations
+      return if mongoid?
+
       if self.class.migration_exists?("db/migrate", "devise_token_auth_create_#{ user_class.pluralize.gsub("::","").underscore }")
         say_status("skipped", "Migration 'devise_token_auth_create_#{ user_class.pluralize.gsub("::","").underscore }' already exists")
       else
@@ -23,24 +27,73 @@ module DeviseTokenAuth
     end
 
     def create_user_model
-      fname = "app/models/#{ user_class.underscore }.rb"
-      unless File.exist?(File.join(destination_root, fname))
+      return if mongoid?
+      unless model_exists?
         template("user.rb", fname)
       else
         inclusion = "include DeviseTokenAuth::Concerns::User"
         unless parse_file_for_line(fname, inclusion)
 
           active_record_needle = (Rails::VERSION::MAJOR == 5) ? 'ApplicationRecord' : 'ActiveRecord::Base'
-          inject_into_file fname, after: "class #{user_class} < #{active_record_needle}\n" do <<-'RUBY'
-  # Include default devise modules.
-  devise :database_authenticatable, :registerable,
-          :recoverable, :rememberable, :trackable, :validatable,
-          :confirmable, :omniauthable
-  include DeviseTokenAuth::Concerns::User
-          RUBY
-          end
+          inject_into_file fname, model_contents, after: "class #{user_class} < #{active_record_needle}\n"
         end
       end
+    end
+
+    def generate_model
+      invoke "mongoid:model", [user_class.capitalize] unless model_exists? && behavior == :invoke && mongoid?
+    end
+
+    def inject_field_types
+      inject_into_file model_path, migration_data, after: "include Mongoid::Document\n" if model_exists? && mongoid?
+    end
+
+    def inject_devise_content
+      inject_into_file model_path, model_contents, after: "include Mongoid::Document\n" if model_exists? && mongoid?
+    end
+
+    def model_contents
+<<RUBY
+  # Include default devise modules.
+  devise :database_authenticatable, :registerable,
+        :recoverable, :rememberable, :trackable, :validatable,
+        :confirmable, :omniauthable
+  include DeviseTokenAuth::Concerns::User
+RUBY
+    end
+
+
+    def migration_data
+<<RUBY
+  ## Database authenticatable
+  field :email,              type: String, default: ""
+  field :encrypted_password, type: String, default: ""
+
+  ## Recoverable
+  field :reset_password_token,   type: String
+  field :reset_password_sent_at, type: Time
+
+  ## Rememberable
+  field :remember_created_at, type: Time
+
+  ## Trackable
+  field :sign_in_count,      type: Integer, default: 0
+  field :current_sign_in_at, type: Time
+  field :last_sign_in_at,    type: Time
+  field :current_sign_in_ip, type: String
+  field :last_sign_in_ip,    type: String
+
+  ## Confirmable
+  # field :confirmation_token,   type: String
+  # field :confirmed_at,         type: Time
+  # field :confirmation_sent_at, type: Time
+  # field :unconfirmed_email,    type: String # Only if using reconfirmable
+
+  ## Lockable
+  # field :failed_attempts, type: Integer, default: 0 # Only if lock strategy is :failed_attempts
+  # field :unlock_token,    type: String # Only if unlock strategy is :email or :both
+  # field :locked_at,       type: Time
+RUBY
     end
 
     def include_controller_concerns
@@ -143,6 +196,18 @@ module DeviseTokenAuth
 
     def mysql?
       database_name == 'ActiveRecord::ConnectionAdapters::MysqlAdapter'
+    end
+
+    def mongoid?
+      orm.downcase == 'mongoid'
+    end
+
+    def model_exists?
+      File.exist?(File.join(destination_root, model_path))
+    end
+
+    def model_path
+      "app/models/#{user_class.underscore}.rb"
     end
 
     def mysql_correct_version?
